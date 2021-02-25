@@ -1,0 +1,629 @@
+---
+title: "Bee Pollen - 16S Analysis"
+author: "Daniel Gladish"
+date: "02/18/2021"
+output:
+  pdf_document: default
+  html_document: default
+urlcolor: blue
+header-includes: \usepackage{xcolor}
+---
+
+Set .libPaths() to the directory that houses the downloaded R packages.
+```{r}
+.libPaths( c( "/isilon/cfia-ottawa-fallowfield/users/girouxeml/gladishd/R/x86_64-pc-linux-gnu-library/3.5" , .libPaths() ) )
+
+```
+
+```{r, global_options, eval=TRUE, echo=FALSE}
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff = 80), tidy = TRUE, fig.align = 'center',
+               cache = FALSE, collapse = TRUE, echo = FALSE, eval = FALSE, include = FALSE,
+               message = FALSE, quietly = TRUE, results = 'hide', warn.conflicts = FALSE, 
+               warning = FALSE)
+```
+
+**Using package `BiocManager` to install required packages:**
+```{r, biocInstall, eval=TRUE, echo=TRUE, include=TRUE}
+#Installing required packages
+r <- getOption("repos")
+r["CRAN"] <- "http://cran.us.r-project.org"
+options(repos = r)
+
+if (!requireNamespace("BiocManager"))
+    install.packages("BiocManager")
+BiocManager::install()
+
+library("BiocManager")
+.cran_packages <- c("data.table", "kableExtra", "knitr", "rprojroot")
+.bioc_packages <- c("BiocStyle", "Biostrings", "dada2", "RAM")
+.inst <- .cran_packages %in% installed.packages()
+if(any(!.inst)) {
+   install.packages(.cran_packages[!.inst])
+}
+.inst <- .bioc_packages %in% installed.packages()
+if(any(!.inst)) {
+  BiocManager::install(.bioc_packages[!.inst], ask = FALSE)
+}
+```
+   
+**Load packages into session, and print package versions:**
+```{r, showBiocPackages, echo=TRUE, eval=TRUE, include=TRUE, results='hold'}
+sapply(c(.cran_packages, .bioc_packages), require, character.only = TRUE)
+```
+**Source our custom R scripts:**    
+For this we will use the rprojroot package to set the directory structures. This will help us when finding our files to source functions. We specify ours is an RStudio project. The root object contains a function that will help us locate our package R files regarless of our current working directory.
+
+Ensure you have the following files in a directory below the directory that holds your .proj file: RemoveQsubTempFiles.R, MakeQsubs.R, MakeJobs.R, and bashDirections.R (basically, cd to the directory that contains your R .proj file, make a new directory within that directory, then download the files to that new directory)
+
+These files are required in order to run this next chunk as well as the chunks that involve running the QIIME2 commands through this R script. These files are available from Emily Giroux's github here: https://github.com/girouxem/oakwilt
+```{r sourcing_my_functions, echo=TRUE, eval=TRUE, include=TRUE, tidy=FALSE}
+library("rprojroot")
+root        <- rprojroot::is_rstudio_project
+scriptsPath <- root$make_fix_file(".")("R")
+scripts     <- dir(root$find_file("R", path = root$find_file()))
+scriptsl    <- paste(scriptsPath, scripts, sep = "/")
+lapply(scriptsl, source)
+```
+
+Setting up working directories:
+```{r}
+sharedPath <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/gladishd/pirl_working"
+analysis <- "bacteria-BP"
+sharedPathAn <- paste(sharedPath, analysis, sep = "/")
+dir.create(sharedPathAn, showWarnings = TRUE, recursive = FALSE)
+imageDirPath <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/gladishd/GitHub_Repos/r_environments/beePollenBacteria/"
+dir.create("/home/CFIA-ACIA/gladishd/GitHub_Repos/r_environments/beePollenBacteria", 
+           showWarnings = TRUE, recursive = FALSE)
+baseImage <- "beePollenBacteria.RData"
+save.image(paste(imageDirPath, baseImage, sep = ""))
+```
+Quick image load:
+```{r}
+imageDirPath <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/gladishd/GitHub_Repos/r_environments/beePollenBacteria/"
+baseImage <- "beePollenBacteria.RData"
+load(paste(imageDirPath, baseImage, sep = ""))
+```
+### Step 1:       
+Set up all folders (baseDir, qiime2, trimmed, logs)     
+```{r}
+library("data.table")
+
+rawDataDirF15 <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/data/raw/Ion_Torrent/pirl_general/R_2020_06_17_10_25_01_user_S5-0143-110-GC2_2019_First15_Meta16SKit_June162020/"
+rawDataDirR29 <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/data/raw/Ion_Torrent/pirl_general/R_2020_08_13_09_06_07_user_S5-0143-116-GC2_2019_rest29samples_Meta16SKit_2020-08-11/"
+rawDataDir <- c(rawDataDirF15, rawDataDirR29)
+compressedFiles <- c("/isilon/cfia-ottawa-fallowfield/users/girouxeml/data/raw/Ion_Torrent/pirl_general/R_2020_06_17_10_25_01_user_S5-0143-110-GC2_2019_First15_Meta16SKit_June162020/R_2020_06_17_10_25_01_user_S5-0143-110-GC2_2019_First15_Meta16SKit_June162020.tar.bz2", "/isilon/cfia-ottawa-fallowfield/users/girouxeml/data/raw/Ion_Torrent/pirl_general/R_2020_08_13_09_06_07_user_S5-0143-116-GC2_2019_rest29samples_Meta16SKit_2020-08-11/R_2020_08_13_09_06_07_user_S5-0143-116-GC2_2019_rest29samples_Meta16SKit_2020-08-11.tar.bz2")
+metadata <- as.data.table(cbind(compressedFiles))
+metadata$rawFileName <- basename(metadata$compressedFiles)
+metadata$basename <- gsub(".tar.bz2", "", metadata$rawFileName)
+rawDataWorkingPath <- paste(sharedPathAn, "rawData", sep = "/")
+dir.create(rawDataWorkingPath, showWarnings = TRUE, recursive = FALSE)
+metadata$rawWorkingPath <- paste(rawDataWorkingPath, metadata$basename, sep = "/")
+
+for(i in 1:nrow(metadata)){
+  cmd <- paste("mkdir -p ",  rawDataWorkingPath, " && tar -xvjf ", metadata$compressedFiles[i], 
+                  " -C ", rawDataWorkingPath, sep = "")  
+  system(cmd)
+}
+
+# NOTE: lines 86-91 are for set up so that the above for loop can be run to easily extract the .fastq sequence files from the tar.bz2 files. 
+
+First15Dir <- paste(rawDataWorkingPath, "R_2020_06_17_10_25_01_user_S5-0143-110-GC2_2019_First15_Meta16SKit_June162020", sep = "/")
+Rest29Dir <- paste(rawDataWorkingPath, "R_2020_08_13_09_06_07_user_S5-0143-116-GC2_2019_rest29samples_Meta16SKit_2020-08-11", sep = "/")
+SeqDirs <- c(First15Dir, Rest29Dir)
+metadata16S_files <- list.files(SeqDirs, pattern = "16S", recursive = TRUE, full.names = TRUE)
+metadata16S <- as.data.table(cbind(metadata16S_files))
+metadata16S$basename <- basename(metadata16S$metadata16S_files)
+metadata16S$barcode <- gsub(".*IonXpress_", "IonXpress_R", metadata16S$basename)
+metadata16S$barcode[1:15] <- gsub(".*IonXpress_R", "IonXpress_F", metadata16S$barcode[1:15])
+metadata16S$barcode <- gsub(".*IonXpress_", "", metadata16S$barcode)
+metadata16S$barcode <- gsub(".fastq", "", metadata16S$barcode)
+
+```
+
+Prepare file directories:
+```{r}
+# Make a directory for the qiime2 output files.
+
+qiime2Dir <- paste(sharedPathAn, "qiime2", sep = "/")
+dir.create(qiime2Dir, showWarnings = TRUE, recursive = FALSE)
+```
+
+Create a manifest file that qiime2 will use to import our fastq data and write it to a tsv file:
+```{r}
+metadata16S$SampleID <- paste("16S-BP-2019", metadata16S$barcode, sep = "-")
+
+library("data.table")
+manifest <- metadata16S[, .('sample-id' = SampleID, 'absolute-filepath' = metadata16S$metadata16S_files)]
+
+write.table(manifest, file = paste(sharedPathAn, "qiime2_import_manifest.tsv", sep = "/"), 
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+Import fastq files into .qza format so that they can be used by QIIME2 (QIIME2 works on files with either .qza or .qzv format)
+```{r}
+prefix <- "qiimeImport"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             "qiime tools import ",
+             " --type 'SampleData[SequencesWithQuality]' ",
+             " --input-path ", paste(sharedPathAn, "qiime2_import_manifest.tsv", sep = "/"),
+             " --output-path ", paste(qiime2Dir, "/demux-single-end.qza", sep = ""),
+             " --input-format SingleEndFastqManifestPhred33V2 ",
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+Create a file to visualise the qiime2 fastq files imported:
+```{r}
+prefix <- "qiimeVisualiseImport"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " qiime demux summarize ",
+             " --i-data  ", paste(qiime2Dir, "/demux-single-end.qza", sep = ""),
+             " --o-visualization ", paste(qiime2Dir, "/demux-single-end.qzv", sep = ""),
+             " --verbose ", 
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+To view demux-single-end.qzv, open https://view.qiime2.org/ with your browser and drag the file into the window at the top of the page.     
+    
+**To remove the output files after you are done:**
+```{r}
+RemoveQsubTempFiles(sharedPathAn, prefix)
+```
+
+Denoise the sequences with dada2 within qiime2:    
+- corrects sequencing errors    
+- removes chimeras    
+- clusters sequences at 100% similarity    
+- outputs an asv table and the representative sequences
+```{r}
+prefix <- "qiimeDADA2deNoiseSingle"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " qiime dada2 denoise-single ",
+             " --i-demultiplexed-seqs ", paste(qiime2Dir, "/demux-single-end.qza", sep = ""),
+             " --p-trim-left 0 ",
+             " --p-trunc-len 0 ",
+             " --o-representative-sequences ", paste(qiime2Dir, "/rep-seqs-dada2.qza", sep = ""),
+             " --o-table ", paste(qiime2Dir, "/table-dada2.qza", sep = ""),
+             " --o-denoising-stats ", paste(qiime2Dir, "/stats-dada2.qza", sep = ""),
+             " --p-n-threads 20 ", 
+             " --verbose ", 
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+Export the dada2 results:    
+```{r}
+# Export ASV (OTU-like table) table
+prefix <- "qiimeExport"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " mkdir ", paste(sharedPathAn, "phyloseq", sep = "/"),
+             " && qiime tools export ",
+             " --input-path ", paste(qiime2Dir, "/table-dada2.qza", sep = ""),
+             " --output-path ", paste(sharedPathAn, "phyloseq", sep = "/"),
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+```{r}
+RemoveQsubTempFiles(sharedPathAn, prefix)
+```
+
+```{r}
+# Convert biom format to tsv format
+prefix <- "qiimeBiomConvert"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " biom convert ",
+             " -i ", paste(sharedPathAn, "phyloseq", "feature-table.biom", sep = "/"), 
+             " -o ", paste(sharedPathAn, "phyloseq", "otu_table.tsv", sep = "/"),
+             " --to-tsv && cd ", paste(sharedPathAn, "phyloseq", sep = "/"),
+             " && sed -i '1d' otu_table.tsv && sed -i 's/#OTU ID//' otu_table.tsv && cd .. ",
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+```{r}
+RemoveQsubTempFiles(sharedPathAn, prefix)
+```
+
+```{r}
+# Export representative sequences
+prefix <- "qiimeRepSeqsExport"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " qiime tools export ",
+             " --input-path ", paste(qiime2Dir, "/rep-seqs-dada2.qza", sep = ""),
+             " --output-path ", paste(sharedPathAn, "phyloseq", sep = "/"),
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+```{r}
+RemoveQsubTempFiles(sharedPathAn, prefix)
+```
+
+Set up the qiime2 Silva 138 database:
+```{r}
+SILVA_138dir <- "/isilon/cfia-ottawa-fallowfield/users/girouxeml/gladishd/Databases/SILVA_138"
+```
+
+ISSUE: is there not supposed to be an "Extract Reference Reads" step here (after importing the taxonomy.txt and reference.fasta read files)?
+
+Re Feb 17: it could be that this step is done to increase the accuracy of taxonomic assignment. Since we used more than 2 primers (The QIIME2 Classifier Training Tutorial seems to show that this step only works with 2 primers), and that the sequence of these primers are proprietary, we cannot do this step.
+
+```{r}
+
+```
+
+Download the pre-trained SILVA 138 classifier (Silva 138 99% OTUs full-length sequences) from https://docs.qiime2.org/2020.11/data-resources/, then do taxonomic classification.
+```{r}
+prefix <- "qiimeClassifyFeature"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " qiime feature-classifier classify-sklearn ",
+             " --i-classifier ", paste(SILVA_138dir, "silva-138-99-nb-classifier.qza", sep = "/"),
+             " --i-reads ", paste(qiime2Dir, "rep-seqs-dada2.qza", sep = "/"),
+             " --o-classification ", paste(qiime2Dir, "taxonomy-single-end.qza", sep = "/"),
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+
+```{r}
+prefix <- "qiimeFeatureExport"
+cmd <- paste("conda activate qiime2-2020.11 && ",
+             " qiime tools export ",
+             " --input-path ", paste(qiime2Dir, "taxonomy-single-end.qza", sep = "/"),
+             " --output-path ", paste(sharedPathAn, "phyloseq", sep = "/"),
+             " && conda deactivate ", sep = "")
+suffix <- ".sub"; cat(bashDirections); MakeQsubs(cmd, prefix, suffix)
+```
+
+To get the ASV/OTU tablewith taxonomy column at the end, combine the otu_table.tsv and taxonomy.tsv together by the otu.id column.
+```{r}
+list.files(path = paste(sharedPathAn, "phyloseq", sep = "/"))
+library(data.table)
+library(phyloseq)
+otuTbl <- fread(paste(sharedPathAn, "phyloseq", "otu_table.tsv", sep = "/"))
+taxTbl <- fread(paste(sharedPathAn, "phyloseq", "taxonomy.tsv", sep = "/"))
+
+
+# Open the taxonomy.tsv file and change the header. When you open it, you’ll see the header looks like this: 
+# Feature ID	Taxon	Confidence
+# where the spaces are tabs. You need to change it to this:
+# otu-id	taxonomy	Confidence
+
+setnames(taxTbl, "Feature ID", "otu-id")
+setnames(taxTbl, "Taxon", "taxonomy")
+
+setnames(otuTbl, "V1", "otu-id")
+
+setkey(otuTbl, "otu-id")
+setkey(taxTbl, "otu-id")
+
+otuTaxTbl <- merge(otuTbl, taxTbl)
+otuTaxTbl$Confidence <- NULL
+
+write.table(otuTaxTbl, file = paste(sharedPathAn, "otuTax_table.tsv", sep = "/"), 
+            quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+```{r}
+library("RAM")
+dir.create(paste(sharedPathAn, "taxFill", sep = "/"), showWarnings = TRUE, recursive    = FALSE)
+taxFillPath <- paste(sharedPathAn, "taxFill", sep = "/")
+taxFillPath <- paste(sharedPathAn, "taxFill", sep = "/")
+
+temp <- read.table(paste(sharedPathAn, "otuTax_table.tsv", sep = "/"), sep = "\t", header = TRUE, dec = ".", 
+                   comment.char = "", quote = "", stringsAsFactors = TRUE,
+                   as.is = TRUE, colClasses=c("taxonomy"="character"))
+
+row.names(temp) <- temp$otu.id
+temp$otu.id <- NULL
+
+temp <- tax.fill(temp, downstream=TRUE)
+colnames(temp) <- gsub("X16S_", "16S_", colnames(temp))
+
+write.table(temp, file=paste(taxFillPath, "BP16S.table.taxfill.tsv", sep = "/"),
+            append = FALSE, sep = "\t", row.names = FALSE, quote = FALSE)
+```
+Create diversity directory and path. List your datasets for diversity indexes. Adds a bunch of columns in a new diversity metadata file.
+Indices obtained (in this specific order) are: Spec Number,  Simpson data,  Inv simpson data,	Shannon data,	Simpson eveness,	Shannon eveness,	Simpson true diversity,	shannon true diversity,	chao,	ACE.
+```{r}
+dir.create(paste(sharedPathAn, "diversity", sep = "/"), showWarnings = TRUE, recursive = FALSE)
+diversityPath <- paste(sharedPathAn, "diversity", sep = "/")
+
+metatemp <-  read.table(paste(sharedPathAn, "BP_16S.meta.tsv", sep = "/"),
+                      sep = "\t", header = TRUE, dec = ".", comment.char = "", quote = "", stringsAsFactors = TRUE,
+                      as.is = TRUE)
+rownames(metatemp) <- colnames(temp)[-ncol(temp)] ## <- must do this in order to use the OTU.diversity() function in the next line.
+
+
+metatempdiv <- OTU.diversity(list(data=temp), metatemp)
+write.table(metatempdiv, file=paste(diversityPath, "BP16S.meta.div.tsv", sep = "/"),
+            append = FALSE, sep = "\t", row.names = FALSE, quote=FALSE)
+```
+
+Save image:
+```{r}
+save.image(paste(imageDirPath, baseImage, sep = ""))
+```
+FIGURES
+
+```{r}
+library("RAM")
+tabletemp <- read.table(paste(taxFillPath, "BP16S.table.taxfill.tsv", sep = "/"),
+                      sep = "\t", header = TRUE, dec = ".", comment.char = "", quote = "", stringsAsFactors = TRUE,
+                      as.is = TRUE, check.names = FALSE, colClasses=c("taxonomy"="character"))
+
+```
+
+Boxplots
+
+To create them, run the group.diversity() function in the console. The figure will appear in the bottom right. Export and save as image (.png) with appropriate dimensions. Dimensions 800 x 700 seems to work well.
+```{r}
+
+dir.create(paste(sharedPathAn, "visualizations", sep = "/"),
+           showWarnings = TRUE,
+           recursive    = FALSE)
+VisDir <- paste(sharedPathAn, "visualizations", sep = "/")
+
+dir.create(paste(VisDir, "boxplots", sep = "/"),
+           showWarnings = TRUE,
+           recursive    = FALSE)
+boxplotDir <- paste(VisDir, "boxplots", sep = "/")
+
+
+#### Shannon True Div ####
+
+## Sample_type
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Sample_type"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Site
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Site"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Location
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Location"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Host_Species
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Host_Species"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Pooled_NotPooled
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Pooled_NotPooled"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Province
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Province"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## CollectionDate
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("CollectionDate"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Address
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Address"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+## OtherInfo1
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("OtherInfo1"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## OtherInfo2
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("OtherInfo2"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+
+
+## Varia
+
+group.diversity(list(data=tabletemp), metatempdiv, factors = c("Varia"), indices = c("shan_trudiv"), diversity.info=TRUE, compare="NULL", ylab="Shannon True Div", facet.x.cex = "10", facet.y.cex = "10")
+```
+
+Generate abundance bar graphs
+
+In the Plot menu, click export then save as image. Save as .png with dimensions that are suitable. Width = 3500, height = 2000 seems to work for me. Do this saving procedure after each time group.abundance.meta() is run. Save to directory groupAbundanceBarPlots that will be created in the next couple of lines. group.abundance.meta() arguments may be altered to best suit your data.
+```{r}
+dir.create(paste(VisDir, "groupAbundanceBarPlots", sep = "/"),
+             showWarnings = TRUE,
+             recursive    = FALSE)
+
+abundNbBarPlotPath <- paste(VisDir, "groupAbundanceBarPlots", sep = "/")
+
+
+#### Location ####
+
+## Species
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="s", top = 30, count = TRUE, drop.unclassified = FALSE, cex.x = 6.7, main = "Top 30 counts of taxonomic groups at the species level", meta = metatempdiv, meta.factor = c("Location"))
+
+
+## Genus
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="g", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 6.7, main = "Top 30 counts of taxonomic groups at the genus level", meta = metatempdiv, meta.factor = c("Location"))
+
+
+#### Host_Species ####
+
+## Species
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="s", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the species level", meta = metatempdiv, meta.factor = c("Host_Species"))
+
+
+## Genus
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="g", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the genus level", meta = metatempdiv, meta.factor = c("Host_Species"))
+
+
+#### OtherInfo1 ####
+
+## Species
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="s", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the species level", meta = metatempdiv, meta.factor = c("OtherInfo1"))
+
+## Genus
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="g", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the genus level", meta = metatempdiv, meta.factor = c("OtherInfo1"))
+
+
+#### Sample_type ####
+
+## Species
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="s", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the species level", meta = metatempdiv, meta.factor = c("Sample_type"))
+
+
+## Genus
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="g", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the genus level", meta = metatempdiv, meta.factor = c("Sample_type"))
+
+
+#### Site ####
+
+## Species
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="s", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the species level", meta = metatempdiv, meta.factor = c("Site"))
+
+
+## Genus
+
+group.abundance.meta(data=(list(data=tabletemp)), rank="g", top = 30, count =  TRUE, drop.unclassified = FALSE, cex.x = 7.5, main = "Top 30 counts of taxonomic groups at the genus level", meta = metatempdiv, meta.factor = c("Site"))
+```
+
+Venn Diagrams
+
+Run each repetition of group.venn() in the console and save to the vennDiagrams directory that will creaetd in the next few lines. As with the previous figure functions, save as a .png with the proper dimensions. With = 2500 and height = 1500 seems to work for me. Can alter the argument cat.dist to increase or decrease the distance of the circle labels to the circles themselves by setting it to a larger or smaller value, respectively.
+```{r}
+dir.create(paste(VisDir, "vennDiagrams", sep = "/"),
+             showWarnings = TRUE,
+             recursive    = FALSE)
+
+vennDir <- paste(VisDir, "vennDiagrams", sep = "/")
+
+
+#### Location ####
+
+## Species
+
+coreTaxa16S_Loca_S <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "s", drop.unclassified = FALSE, meta.factor = "Location", percent = 0)
+
+FraValTaxa_S <- coreTaxa16S_Loca_S$data$`Fraser Valley`$taxa
+BeavTaxa_S <- coreTaxa16S_Loca_S$data$Beaverlodge$taxa
+OliTaxa_S <- coreTaxa16S_Loca_S$data$Oliver$taxa
+SummTaxa_S <- coreTaxa16S_Loca_S$data$Summerland$taxa
+
+LocaVector_S <- list(Fraser_Valley = FraValTaxa_S, Beaverlodge = BeavTaxa_S, Oliver = OliTaxa_S, Summerland = SummTaxa_S)
+
+group.venn(vectors = LocaVector_S, cat.cex = 3, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "green", "pink", "blue"), lab.col = "black")
+
+
+## Genus
+
+coreTaxa16S_Loca_G <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "g", drop.unclassified = FALSE, meta.factor = "Location", percent = 0)
+
+FraValTaxa_G <- coreTaxa16S_Loca_G$data$`Fraser Valley`$taxa
+BeavTaxa_G <- coreTaxa16S_Loca_G$data$Beaverlodge$taxa
+OliTaxa_G <- coreTaxa16S_Loca_G$data$Oliver$taxa
+SummTaxa_G <- coreTaxa16S_Loca_G$data$Summerland$taxa
+
+LocaVector_G <- list(Fraser_Valley = FraValTaxa_G, Beaverlodge = BeavTaxa_G, Oliver = OliTaxa_G, Summerland = SummTaxa_G)
+
+group.venn(vectors = LocaVector_G, cat.cex = 3, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "green", "pink", "blue"), lab.col = "black")
+
+
+
+#### Host_Species ####
+
+## Species
+
+coreTaxa16S_Host_S <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "s", drop.unclassified = FALSE, meta.factor = "Host_Species", percent = 0)
+
+BlueberryTaxa_S <- coreTaxa16S_Host_S$data$Blueberry$taxa
+ApplesTaxa_S <- coreTaxa16S_Host_S$data$Apples$taxa
+CanolaTaxa_S <- coreTaxa16S_Host_S$data$Canola$taxa
+
+HostVector_S <- list(Blueberry = BlueberryTaxa_S, Apples = ApplesTaxa_S, Canola = CanolaTaxa_S)
+
+group.venn(vectors = HostVector_S, cat.cex = 3, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green"), lab.col = "black")
+
+
+## Genus
+
+coreTaxa16S_Host_G <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "g", drop.unclassified = FALSE, meta.factor = "Host_Species", percent = 0)
+
+BlueberryTaxa_G <- coreTaxa16S_Host_G$data$Blueberry$taxa
+ApplesTaxa_G <- coreTaxa16S_Host_G$data$Apples$taxa
+CanolaTaxa_G <- coreTaxa16S_Host_G$data$Canola$taxa
+
+HostVector_G <- list(Blueberry = BlueberryTaxa_G, Apples = ApplesTaxa_G, Canola = CanolaTaxa_G)
+
+group.venn(vectors = HostVector_G, cat.cex = 3, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green"), lab.col = "black")
+
+
+
+#### Sample_type ####
+
+## Species
+
+coreTaxa16S_SampType_S <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "s", drop.unclassified = FALSE, meta.factor = "Sample_type", percent = 0)
+
+BeeTaxa_S <- coreTaxa16S_SampType_S$data$Bee$taxa
+PollenTaxa_S <- coreTaxa16S_SampType_S$data$Pollen$taxa
+BreadTaxa_S <- coreTaxa16S_SampType_S$data$Bread$taxa
+ForagersTaxa_S <- coreTaxa16S_SampType_S$data$Foragers$taxa
+LeafTaxa_S <- coreTaxa16S_SampType_S$data$Leaf$taxa
+
+SampTypeVector_S <- list(Bee = BeeTaxa_S, Pollen = PollenTaxa_S, Bread = BreadTaxa_S, Foragers = ForagersTaxa_S, Leaf = LeafTaxa_S)
+
+group.venn(vectors = SampTypeVector_S, cat.cex = 3, cat.dist = 0.1, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green", "pink", "orange"), lab.col = "black")
+
+
+## Genus
+
+coreTaxa16S_SampType_G <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "g", drop.unclassified = FALSE, meta.factor = "Sample_type", percent = 0)
+
+BeeTaxa_G <- coreTaxa16S_SampType_G$data$Bee$taxa
+PollenTaxa_G <- coreTaxa16S_SampType_G$data$Pollen$taxa
+BreadTaxa_G <- coreTaxa16S_SampType_G$data$Bread$taxa
+ForagersTaxa_G <- coreTaxa16S_SampType_G$data$Foragers$taxa
+LeafTaxa_G <- coreTaxa16S_SampType_G$data$Leaf$taxa
+
+SampTypeVector_G <- list(Bee = BeeTaxa_G, Pollen = PollenTaxa_G, Bread = BreadTaxa_G, Foragers = ForagersTaxa_G, Leaf = LeafTaxa_G)
+
+group.venn(vectors = SampTypeVector_S, cat.cex = 3, cat.dist = 0.1, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green", "pink", "orange"), lab.col = "black")
+
+
+#### Site ####
+
+## Species
+
+coreTaxa16S_Site_S <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "s", drop.unclassified = FALSE, meta.factor = "Site", percent = 0)
+
+INTaxa_S <- coreTaxa16S_Site_S$data$IN$taxa
+OUTTaxa_S <- coreTaxa16S_Site_S$data$OUT$taxa
+SummSite2Taxa_S <- coreTaxa16S_Site_S$data$Summerland_site2
+OlivSiteTaxa_S <- coreTaxa16S_Site_S$data$Oliver
+CanTaxa_S <- coreTaxa16S_Site_S$data$Canola
+
+SiteVector_S <- list(IN = INTaxa_S, OUT = OUTTaxa_S, Summerland_site2 = SummSite2Taxa_S, Oliver = OlivSiteTaxa_S, Canola = CanTaxa_S)
+
+group.venn(vectors = SiteVector_S, cat.cex = 3, cat.dist = 0.1, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green", "orange", "pink"), lab.col = "black")
+
+
+## Genus
+
+coreTaxa16S_Site_G <- core.Taxa(data = list(data = tabletemp), is.OTU = TRUE, meta = metatempdiv, rank = "g", drop.unclassified = FALSE, meta.factor = "Site", percent = 0)
+
+INTaxa_G <- coreTaxa16S_Site_G$data$IN$taxa
+OUTTaxa_G <- coreTaxa16S_Site_G$data$OUT$taxa
+SummSite2Taxa_G <- coreTaxa16S_Site_G$data$Summerland_site2
+OlivSiteTaxa_G <- coreTaxa16S_Site_G$data$Oliver
+CanTaxa_G <- coreTaxa16S_Site_G$data$Canola$taxa
+
+SiteVector_G <- list(IN = INTaxa_G, OUT = OUTTaxa_G, Summerland_site2 = SummSite2Taxa_G, Oliver = OlivSiteTaxa_G, Canola = CanTaxa_G)
+
+group.venn(vectors = SiteVector_S, cat.cex = 3, cat.dist = 0.1, cex = 3, label = FALSE, lab.cex = 1, fill = c("red", "blue", "green", "orange", "pink"), lab.col = "black")
+
+```
